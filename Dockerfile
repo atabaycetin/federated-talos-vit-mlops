@@ -5,6 +5,7 @@
 #   talos package --config configs/talos_cifar100.yaml --store model_store
 #   docker build -t talos-api .
 #   docker build --target taskvector -t talos-api:taskvector .
+#   docker buildx build --platform linux/amd64 --target lambda --provenance=false ...   # AWS Lambda
 
 # Base image pinned by digest (multi-arch index), dependencies installed from hashed lock files:
 # the same commit always builds the same image, and a tampered package fails the hash check.
@@ -16,7 +17,9 @@ RUN useradd --uid 10001 --create-home app
 COPY requirements/serve.txt requirements/
 RUN pip install --require-hashes -r requirements/serve.txt
 # Run from source instead of `pip install .`, which would fetch an unpinned build backend.
+# COPY keeps host file modes; make the code readable by the non-root user whatever they were.
 COPY src ./src
+RUN chmod -R a+rX src
 ENV PYTHONPATH=/app/src MODEL_STORE=/models PORT=8000 WORKERS=1 THREADS=0
 EXPOSE 8000
 HEALTHCHECK --interval=30s --timeout=3s --start-period=20s \
@@ -37,6 +40,15 @@ for p in pathlib.Path("/models").glob("*/meta.json"):
         timm.create_model(meta["backbone"], pretrained=True)
 PY
 RUN mkdir -p /opt/hf && chmod -R a+rX /opt/hf
+USER app
+
+# AWS Lambda: the onnx image plus the Lambda Web Adapter, which turns Lambda invocations into
+# HTTP requests to uvicorn. Must stay above `onnx`: the last stage is the default build target.
+FROM base AS lambda
+COPY --from=public.ecr.aws/awsguru/aws-lambda-adapter:1.1.0@sha256:17cfd08eff1dfea3f6a9a1e9c65fdac80aa4919b6085e746615530f43f57d2f1 \
+  /lambda-adapter /opt/extensions/lambda-adapter
+ENV BACKEND=onnx AWS_LWA_PORT=8000 AWS_LWA_READINESS_CHECK_PATH=/health
+COPY model_store /models
 USER app
 
 FROM base AS onnx

@@ -2,7 +2,7 @@
 
 This repository supports a research project on **Deep Learning and Federated Learning**, focusing on **centralized and federated training of Vision Transformers (ViT)** on the CIFAR-100 dataset. The project explores advanced fine-tuning and pruning methods such as **LoRA** and **TaLoS**, targeting efficient adaptation in distributed, resource-constrained scenarios.
 
-It also contains a **production layer** (`src/talos_mlops/`) that turns the centralized TaLoS method into a served model: a config-driven training pipeline tracked in MLflow, ONNX + INT8 export, a FastAPI service with Prometheus metrics and drift detection, Docker images, CI/CD with GitHub Actions, and deployment on Azure Container Apps.
+It also contains a **production layer** (`src/talos_mlops/`) that turns the centralized TaLoS method into a served model: a config-driven training pipeline tracked in MLflow, ONNX + INT8 export, a FastAPI service with Prometheus metrics and drift detection, Docker images, CI/CD with GitHub Actions, and deployment on Azure Container Apps, with a second deployment on AWS Lambda.
 
 ---
 
@@ -120,11 +120,10 @@ The input shift is caught even though the model's confidence barely moves. A mon
 `.github/workflows/ci.yml` runs on every push and pull request:
 
 ```
-lint (ruff) ─┐
-test (pytest)┴► build image ► container smoke test ► Trivy scan ► push to GHCR ► deploy to Azure ► post-deploy health check
-                              (/health, /predict,   (fails on       (main only)   (main only, protected
-                               /metrics)             fixable HIGH/                `production` environment)
-                                                     CRITICAL CVEs)
+lint (ruff) ► build image ► container smoke test ► Trivy scan ► push to GHCR ► deploy to Azure ► post-deploy health check
+                             (/health, /predict,   (fails on       (main only)   (main only, protected
+                              /metrics)             fixable HIGH/                `production` environment)
+                                                    CRITICAL CVEs)
 ```
 
 The service runs on **Azure Container Apps** (Switzerland North): 0.5 vCPU / 1 GiB per replica, scaling from **0** replicas when idle to at most 1, with no Log Analytics workspace. That keeps it within the consumption free tier. Every deploy is a new revision tagged with the commit SHA.
@@ -135,6 +134,38 @@ The trained model store is published as a GitHub Release asset, not committed. C
 bash scripts/publish_model.sh configs/talos_cifar100.yaml configs/talos_cifar10.yaml model-v2   # packages every task, uploads, sets MODEL_RELEASE
 deploy/azure/setup.sh                                          # one-time: RG, environment, app, deploy identity, GitHub environment
 ```
+
+**Pausing and resuming.** Both deployments can be switched off without deleting anything: `scripts/pause.sh` disables CI, deactivates the Azure revision and sets Lambda's concurrency to 0, and `scripts/resume.sh` reverses it. See [docs/operations.md](docs/operations.md) for each step.
+
+### Also on AWS Lambda
+
+The same service also runs as an **AWS Lambda** function behind a public Function URL (`eu-north-1`), deployed by hand with the AWS CLI rather than from CI. The `lambda` Docker target is the ONNX image plus the [AWS Lambda Web Adapter](https://github.com/awslabs/aws-lambda-web-adapter), which turns Lambda invocations into HTTP requests to uvicorn, so the FastAPI code is unchanged.
+
+```bash
+docker buildx build --platform linux/amd64 --target lambda --provenance=false \
+  -t <account>.dkr.ecr.eu-north-1.amazonaws.com/talos-api:v1 --push .     # Lambda rejects buildx attestation manifests
+aws iam create-role --role-name talos-lambda --assume-role-policy-document file://deploy/aws/trust.json
+aws iam attach-role-policy --role-name talos-lambda --policy-arn arn:aws:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole
+aws lambda create-function --function-name talos-api --package-type Image --code ImageUri=<image> \
+  --role <role-arn> --memory-size 512 --timeout 30 \
+  --environment "Variables={API_KEY=$KEY,DEFAULT_TASK=cifar100,THREADS=1}" --query State --output text
+aws lambda create-function-url-config --function-name talos-api --auth-type NONE
+aws lambda add-permission --function-name talos-api --statement-id public-url --action lambda:InvokeFunctionUrl \
+  --principal '*' --function-url-auth-type NONE
+aws lambda add-permission --function-name talos-api --statement-id public-invoke --action lambda:InvokeFunction \
+  --principal '*' --invoked-via-function-url
+```
+
+How the two platforms compared for the same image:
+
+| | Azure Container Apps | AWS Lambda |
+|---|---|---|
+| Unit of compute | a container replica (0.5 vCPU / 1 GiB) | a function instance per concurrent request (512 MB ≈ 0.3 vCPU) |
+| Cold start (`/health`) | ~5 s | ~25 s |
+| Largest upload | 10 MB (the app's limit) | ~6 MB Function URL payload cap, enforced before the app |
+| `/metrics`, `/drift` | one long-lived replica accumulates them | per instance; they reset whenever Lambda recycles an instance |
+| Registry | GHCR (public) | ECR (private) |
+
 
 **Security and supply chain**
 
