@@ -139,7 +139,7 @@ deploy/azure/setup.sh                                          # one-time: RG, e
 
 ### Also on AWS Lambda
 
-The same service also runs as an **AWS Lambda** function behind a public Function URL (`eu-north-1`), deployed by hand with the AWS CLI rather than from CI. The `lambda` Docker target is the ONNX image plus the [AWS Lambda Web Adapter](https://github.com/awslabs/aws-lambda-web-adapter), which turns Lambda invocations into HTTP requests to uvicorn, so the FastAPI code is unchanged.
+The same service also runs as an **AWS Lambda** function behind a public Function URL (`eu-north-1`). The `lambda` Docker target is the ONNX image plus the [AWS Lambda Web Adapter](https://github.com/awslabs/aws-lambda-web-adapter), which turns Lambda invocations into HTTP requests to uvicorn, so the FastAPI code is unchanged.
 
 ```bash
 docker buildx build --platform linux/amd64 --target lambda --provenance=false \
